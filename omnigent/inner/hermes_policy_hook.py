@@ -37,6 +37,34 @@ import json
 import os
 import sys
 
+# Hermes' pre_tool_call *plugin* callback times out at 30s
+# (``plugins.hook_callback_timeout``, default 30, max 600). Long-polling
+# ``ask_timeout`` (86400) here means Hermes marks the plugin timed out
+# while this process is still waiting, and later tool calls in the
+# session jam. Return a fail-closed deny before that cap. The server
+# keeps the approval card parked for the re-park grace, so it can still
+# be answered later.
+HERMES_PLUGIN_HOOK_TIMEOUT_S = 30.0
+# HTTP read budget: under the plugin cap, with headroom for connect,
+# process startup, and writing the deny body.
+HERMES_POLICY_EVAL_READ_TIMEOUT_S = 25.0
+
+_APPROVAL_WAIT_TIMEOUT_REASON = (
+    "Approval was not answered before the Hermes pre_tool_call hook "
+    "timeout (30s). The tool was denied so this session can continue; "
+    "the approval card remains open and can still be answered later."
+)
+
+
+def _is_evaluate_read_timeout(detail: str | None) -> bool:
+    """True when *detail* is a failed evaluate caused by an HTTP read timeout."""
+    if not detail:
+        return False
+    low = detail.lower()
+    # ConnectTimeout is reported as "connection error: ..." by
+    # post_evaluate_with_retry; ReadTimeout uses "request error: ...".
+    return "readtimeout" in low or "read operation timed out" in low
+
 
 def main() -> None:
     server_url = os.environ.get("_OMNIGENT_SERVER_URL", "")
@@ -105,7 +133,7 @@ def main() -> None:
             url=url,
             headers=headers,
             eval_request=eval_body,
-            read_timeout=86400.0,
+            read_timeout=HERMES_POLICY_EVAL_READ_TIMEOUT_S,
             hook_label="hermes pre_tool_call",
             reauth=reauth,
         )
@@ -115,17 +143,13 @@ def main() -> None:
 
     if resp is None:
         detail = api_error or (reauth.failure_reason if reauth else None)
-        json.dump(
-            {
-                "decision": "block",
-                "reason": (
-                    f"Policy evaluation unavailable: {detail}"
-                    if detail
-                    else "Policy evaluation unavailable"
-                ),
-            },
-            sys.stdout,
-        )
+        if _is_evaluate_read_timeout(detail):
+            reason = _APPROVAL_WAIT_TIMEOUT_REASON
+        elif detail:
+            reason = f"Policy evaluation unavailable: {detail}"
+        else:
+            reason = "Policy evaluation unavailable"
+        json.dump({"decision": "block", "reason": reason}, sys.stdout)
         return
 
     try:
