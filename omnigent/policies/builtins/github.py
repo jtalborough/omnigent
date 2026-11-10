@@ -35,7 +35,10 @@ policy is stateless and only ever inspects ``tool_call`` events):
   DENYed as anomalous.
 
 Repos are matched case-insensitively as ``owner/repo`` (GitHub treats them so);
-branches are matched exactly (git branch names are case-sensitive). Both bare
+branches are matched exactly (git branch names are case-sensitive), or with
+case-sensitive :func:`fnmatch.fnmatchcase` when a ``write_branches`` entry
+contains ``*``, ``?``, or ``[`` (so ``rai/*`` allows ``rai/x`` and denies
+``main``). A bare ``*`` would allow every branch, including ``main``. Both bare
 ``owner/repo`` strings and full GitHub URLs (``https://github.com/owner/repo``,
 ``git@github.com:owner/repo.git``) are accepted in the allowlists and parsed
 out of arguments / command text.
@@ -67,6 +70,7 @@ YAML usage::
 
 from __future__ import annotations
 
+import fnmatch
 import re
 import shlex
 from collections.abc import Callable
@@ -284,6 +288,28 @@ def _normalize_branches(values: list[str] | None) -> set[str]:
     :returns: Set of bare branch names, empties dropped.
     """
     return {branch for value in (values or []) if (branch := _normalize_branch(value))}
+
+
+def _branch_allowed(branch: str, allowed: set[str]) -> bool:
+    """
+    Return whether *branch* is permitted by the ``write_branches`` allowlist.
+
+    Entries that contain ``*``, ``?``, or ``[`` are matched with
+    :func:`fnmatch.fnmatchcase` (git branch names are case-sensitive). Other
+    entries are exact names. A bare ``*`` matches every branch, including
+    ``main``.
+
+    :param branch: Bare branch name, already normalized.
+    :param allowed: The configured ``write_branches`` set.
+    :returns: ``True`` if *branch* may be written under *allowed*.
+    """
+    for pat in allowed:
+        if any(ch in pat for ch in "*?["):
+            if fnmatch.fnmatchcase(branch, pat):
+                return True
+        elif branch == pat:
+            return True
+    return False
 
 
 def _first_str(args: dict[str, Any], keys: tuple[str, ...]) -> str | None:  # type: ignore[explicit-any]
@@ -1076,8 +1102,12 @@ def github_policy(
     :param write_repos: Repos the agent may write to, as ``owner/repo`` or URLs.
         ``None`` → no repo is writable.
     :param write_branches: Branches writable within an allowed repo, e.g.
-        ``["main", "develop"]``. ``None`` / empty means branches are not
-        restricted (any branch on an allowed repo is writable).
+        ``["main", "develop"]`` or prefix globs such as ``["rai/*"]``.
+        Entries containing ``*``, ``?``, or ``[`` are case-sensitive
+        fnmatch patterns; other entries are exact names. ``None`` / empty
+        means branches are not restricted (any branch on an allowed repo
+        is writable). A bare ``*`` would allow every branch, including
+        ``main``.
     :param allow_destructive: When ``False`` (default), irreversible destructive
         operations (deletes) are denied even on allowed repos. Set to ``True``
         to let destructive operations through normal write gating.
@@ -1175,7 +1205,7 @@ def github_policy(
             )
         if allowed_write_branches:
             if branches:
-                bad = branches - allowed_write_branches
+                bad = {b for b in branches if not _branch_allowed(b, allowed_write_branches)}
                 if bad:
                     return _deny(
                         f"{deny_reason} Write is restricted to branches "
@@ -1393,7 +1423,11 @@ POLICY_REGISTRY: list[dict[str, Any]] = [  # type: ignore[explicit-any]
                 "write_branches": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Branches writable within an allowed repo. Empty = any branch.",
+                    "description": (
+                        "Branches writable within an allowed repo "
+                        "(exact names or fnmatch globs like rai/*). "
+                        "Empty = any branch."
+                    ),
                 },
                 "allow_destructive": {
                     "type": "boolean",

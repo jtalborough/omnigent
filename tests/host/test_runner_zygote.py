@@ -1171,6 +1171,44 @@ def test_fork_harness_argv_round_trips_to_child(manager: ZygoteManager, tmp_path
     assert f"harness_argv={' '.join(argv)}" in log.read_text()
 
 
+def test_run_harness_child_sets_sys_argv_so_conversation_id_is_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zygote-forked harness child exposes ``--conversation-id`` on ``sys.argv``.
+
+    ``_runner.main()`` parses the argv passed to it, but the Hermes and Cursor
+    executors read the conversation id from ``sys.argv``. The child used to
+    keep the zygote's argv, so ``_get_conversation_id()`` returned ``None``
+    and policy hooks never loaded (issue #2).
+    """
+    recorded: dict[str, object] = {}
+
+    def fake_main(argv: list[str]) -> None:
+        from omnigent.inner.hermes_executor import _get_conversation_id
+
+        recorded["argv"] = list(argv)
+        recorded["sys_argv"] = list(sys.argv)
+        recorded["conv"] = _get_conversation_id()
+
+    monkeypatch.setattr("omnigent.runtime.harnesses._runner.main", fake_main)
+    monkeypatch.setattr(_zygote, "_apply_child_env", lambda request: None)
+    monkeypatch.setattr(_zygote, "_wire_child_stdio", lambda path: None)
+    from omnigent.runner.identity import RUNNER_WORKSPACE_ENV_VAR
+
+    monkeypatch.delenv(RUNNER_WORKSPACE_ENV_VAR, raising=False)
+    # Pretend we are the zygote process: no conversation id on the live argv.
+    monkeypatch.setattr(sys, "argv", ["omnigent.runner._zygote"])
+    from omnigent.inner.hermes_executor import _get_conversation_id
+
+    assert _get_conversation_id() is None
+
+    argv = ["--harness", "hermes", "--conversation-id", "conv-from-payload"]
+    _zygote._run_harness_child({"argv": argv, "env": {}})
+    assert recorded["conv"] == "conv-from-payload"
+    assert recorded["sys_argv"] == argv
+    assert recorded["argv"] == argv
+
+
 def test_forked_harness_runs_in_the_session_workspace(manager: ZygoteManager, tmp_path) -> None:
     """A harness fork chdirs to the session workspace, not the zygote's cwd.
 
