@@ -182,6 +182,58 @@ def test_write_branch_non_allowlisted_denied() -> None:
     assert result is not None and result["result"] == "DENY"
 
 
+def test_write_branch_glob_allows_matching_prefix() -> None:
+    """``rai/*`` allows a branch under that prefix on an allowed repo."""
+    policy = github_policy(write_repos=[_REPO], write_branches=["rai/*"])
+    event = tc(
+        "mcp__github__create_or_update_file",
+        {"owner": "octo", "repo": "hello", "branch": "rai/x"},
+    )
+    assert policy(event) is None
+
+
+def test_write_branch_glob_denies_main() -> None:
+    """``rai/*`` does not allow ``main`` — the default branch stays blocked."""
+    policy = github_policy(write_repos=[_REPO], write_branches=["rai/*"])
+    event = tc(
+        "mcp__github__create_or_update_file",
+        {"owner": "octo", "repo": "hello", "branch": "main"},
+    )
+    result = policy(event)
+    assert result is not None and result["result"] == "DENY"
+
+
+def test_write_branch_glob_denies_unslashed_prefix() -> None:
+    """``rai/*`` does not allow the bare name ``rai`` (no slash segment)."""
+    policy = github_policy(write_repos=[_REPO], write_branches=["rai/*"])
+    event = tc(
+        "mcp__github__create_or_update_file",
+        {"owner": "octo", "repo": "hello", "branch": "rai"},
+    )
+    result = policy(event)
+    assert result is not None and result["result"] == "DENY"
+
+
+def test_write_branch_exact_name_still_allowed_alongside_glob() -> None:
+    """Exact names in the same list still match, independently of globs."""
+    policy = github_policy(write_repos=[_REPO], write_branches=["rai/*", "develop"])
+    event = tc(
+        "mcp__github__create_or_update_file",
+        {"owner": "octo", "repo": "hello", "branch": "develop"},
+    )
+    assert policy(event) is None
+
+
+def test_shell_push_glob_branch_allowed_and_main_denied() -> None:
+    """A URL ``git push`` to ``rai/x`` is allowed under ``rai/*``; ``main`` is not."""
+    policy = github_policy(write_repos=[_REPO], write_branches=["rai/*"])
+    assert policy(_sh("git push https://github.com/octo/hello rai/x")) is None
+    result = policy(_sh("git push https://github.com/octo/hello main"))
+    assert result is not None and result["result"] == "DENY"
+    result = policy(_sh("git push https://github.com/octo/hello rai"))
+    assert result is not None and result["result"] == "DENY"
+
+
 def test_branch_targeted_write_without_branch_denied_under_branch_restriction() -> None:
     """A file write with no branch arg fails closed when branches are restricted.
 
