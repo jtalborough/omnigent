@@ -76,3 +76,91 @@ def test_native_and_other_mcp_tools_are_still_gated(
     # Hermes' own tools (and non-Omnigent MCP servers) do NOT round-trip the
     # relay, so the hook stays their policy gate.
     assert server_called is True
+
+
+def test_evaluate_uses_a_read_timeout_under_the_hermes_plugin_cap(
+    monkeypatch: pytest.MonkeyPatch, wired_env: None
+) -> None:
+    """The hook must return before Hermes' 30s pre_tool_call plugin timeout."""
+    seen: dict[str, float] = {}
+
+    def _spy(*_args, **kwargs):
+        seen["read_timeout"] = kwargs["read_timeout"]
+
+        class _R:
+            def json(self) -> dict:
+                return {"result": "POLICY_ACTION_ALLOW"}
+
+        return _R(), None
+
+    monkeypatch.setattr(
+        "omnigent.native.native_policy_hook.post_evaluate_with_retry", _spy, raising=True
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(json.dumps({"tool_name": "terminal", "tool_input": {"command": "ls"}})),
+    )
+    out = io.StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    hermes_policy_hook.main()
+    assert json.loads(out.getvalue() or "{}") == {}
+    timeout = seen["read_timeout"]
+    assert timeout == hermes_policy_hook.HERMES_POLICY_EVAL_READ_TIMEOUT_S
+    assert timeout < hermes_policy_hook.HERMES_PLUGIN_HOOK_TIMEOUT_S
+    assert timeout <= 25.0
+
+
+def test_unanswered_ask_times_out_as_a_clean_deny(
+    monkeypatch: pytest.MonkeyPatch, wired_env: None
+) -> None:
+    """A parked ASK that hits the hook read timeout is a deny, not a jammed hook."""
+
+    def _spy(*_args, **_kwargs):
+        return None, "request error: The read operation timed out"
+
+    monkeypatch.setattr(
+        "omnigent.native.native_policy_hook.post_evaluate_with_retry", _spy, raising=True
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "tool_name": "terminal",
+                    "tool_input": {
+                        "command": "git push https://github.com/jtalborough/magpie.git rai/x"
+                    },
+                }
+            )
+        ),
+    )
+    out = io.StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    hermes_policy_hook.main()
+    result = json.loads(out.getvalue())
+    assert result["decision"] == "block"
+    assert "30s" in result["reason"]
+    assert "session can continue" in result["reason"]
+    assert "approval card remains open" in result["reason"]
+
+
+def test_connect_failure_is_not_reported_as_an_approval_timeout(
+    monkeypatch: pytest.MonkeyPatch, wired_env: None
+) -> None:
+    def _spy(*_args, **_kwargs):
+        return None, "connection error: timed out"
+
+    monkeypatch.setattr(
+        "omnigent.native.native_policy_hook.post_evaluate_with_retry", _spy, raising=True
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(json.dumps({"tool_name": "terminal", "tool_input": {}})),
+    )
+    out = io.StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    hermes_policy_hook.main()
+    result = json.loads(out.getvalue())
+    assert result["decision"] == "block"
+    assert result["reason"].startswith("Policy evaluation unavailable:")
+    assert "approval card remains open" not in result["reason"]
