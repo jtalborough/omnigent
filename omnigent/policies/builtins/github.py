@@ -934,36 +934,155 @@ def _classify_gh(tokens: list[str]) -> _ShellOp | None:
     )
 
 
+_GH_API_HTTP_METHODS: frozenset[str] = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"})
+
+# Flags whose following token is a value, so it is not an endpoint or method.
+_GH_API_VALUE_FLAGS: frozenset[str] = frozenset(
+    {
+        "-X",
+        "--method",
+        "-H",
+        "--header",
+        "-F",
+        "--field",
+        "-f",
+        "--raw-field",
+        "--input",
+        "--hostname",
+        "-p",
+        "--preview",
+        "-q",
+        "--jq",
+        "-t",
+        "--template",
+        "--cache",
+    }
+)
+
+
+def _gh_api_positionals(rest: list[str]) -> list[str]:
+    """
+    Return non-flag positional tokens from a ``gh api`` argv.
+
+    Skips flags and the values of flags that take an argument, so a
+    method token (``-X DELETE``) is not mistaken for the endpoint.
+
+    :param rest: Tokens after ``gh api``.
+    :returns: Positional tokens in order (method shorthand and/or endpoint).
+    """
+    positionals: list[str] = []
+    skip_next = False
+    for token in rest:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in _GH_API_VALUE_FLAGS:
+            skip_next = True
+            continue
+        if token.startswith("--") and "=" in token:
+            continue
+        if token.startswith("-"):
+            continue
+        positionals.append(token)
+    return positionals
+
+
+def _gh_api_method_and_endpoint(rest: list[str]) -> tuple[str | None, str | None]:
+    """
+    Extract the HTTP method and API path from a ``gh api`` argv.
+
+    The method comes from ``-X`` / ``--method`` (including ``-XDELETE`` and
+    ``--method=DELETE``), or from a leading positional token that is an HTTP
+    method (the form used in the 2026-11-10 push test: ``gh api DELETE
+    repos/o/r/git/refs/heads/branch``). The endpoint is the first remaining
+    positional.
+
+    :param rest: Tokens after ``gh api``.
+    :returns: ``(method, endpoint)``. Either may be ``None`` when absent.
+    """
+    method = _flag_value(rest, frozenset({"-X", "--method"}))
+    if method is None:
+        for token in rest:
+            if token.startswith("-X") and token != "-X":
+                method = token[2:]
+                break
+            if token.startswith("--method="):
+                method = token.split("=", 1)[1]
+                break
+    positionals = _gh_api_positionals(rest)
+    if method is None and positionals and positionals[0].upper() in _GH_API_HTTP_METHODS:
+        method = positionals[0]
+        positionals = positionals[1:]
+    endpoint = positionals[0] if positionals else None
+    return (method.upper() if method else None, endpoint)
+
+
+def _branch_from_git_ref_api_path(path: str) -> str | None:
+    """
+    Return the branch name from a ``.../git/refs/heads/<branch>`` API path.
+
+    ``<branch>`` may contain slashes (``rai/push-test-...``). Tag refs are
+    ignored here; tag deletes are still marked destructive by HTTP method.
+
+    :param path: A ``gh api`` endpoint or URL.
+    :returns: The branch name, or ``None`` when the path is not a head ref.
+    """
+    path = path.split("?", 1)[0].rstrip("/")
+    if not path.startswith("/"):
+        path = "/" + path
+    marker = "/git/refs/heads/"
+    idx = path.find(marker)
+    if idx == -1:
+        return None
+    return path[idx + len(marker) :] or None
+
+
 def _classify_gh_api(rest: list[str], repo: str | None) -> _ShellOp:
     """
     Classify a ``gh api`` call (REST method decides read vs write).
 
     ``gh api`` defaults to GET (read); an explicit write method
-    (``-X POST`` / ``--method PATCH`` / …) or the presence of field flags
-    (``-f`` / ``--field`` / ``--raw-field`` / ``--input``, which make gh default
-    to POST) marks it a write.
+    (``-X POST`` / ``--method PATCH`` / a leading ``POST`` token / …) or the
+    presence of field flags (``-f`` / ``--field`` / ``--raw-field`` /
+    ``--input``, which make gh default to POST) marks it a write.
+
+    HTTP ``DELETE`` is also destructive, matching ``git push :ref`` and
+    ``gh release delete``: it is denied unless ``allow_destructive`` is on.
+    A ``DELETE`` of ``git/refs/heads/<branch>`` is branch-targeted so
+    ``write_branches`` still applies when deletes are opted in.
 
     :param rest: Tokens after ``gh api``, e.g. ``["repos/o/r/pulls", "-X", "POST"]``.
     :param repo: Repo already extracted from ``--repo`` / a URL, if any.
     :returns: A read or write :class:`_ShellOp` for the api call.
     """
-    method = _flag_value(rest, frozenset({"-X", "--method"}))
+    method, endpoint = _gh_api_method_and_endpoint(rest)
     has_fields = any(
         t in {"-f", "--field", "-F", "--raw-field", "--input"}
         or t.startswith(("-f=", "--field=", "-F=", "--raw-field="))
         for t in rest
     )
     write_methods = {"POST", "PUT", "PATCH", "DELETE"}
-    is_write = (method is not None and method.upper() in write_methods) or (
+    is_write = (method is not None and method in write_methods) or (
         method is None and has_fields
     )
     api_repo = repo or _repo_from_tokens(rest)
+    is_destructive = is_write and method == "DELETE"
+    branches: frozenset[str] = frozenset()
+    branch_targeted = False
+    if is_destructive and endpoint:
+        branch = _branch_from_git_ref_api_path(endpoint)
+        if branch:
+            normalized = _normalize_branch(branch)
+            if normalized:
+                branches = frozenset({normalized})
+                branch_targeted = True
     return _ShellOp(
         kind="write" if is_write else "read",
         repo=api_repo,
-        branches=frozenset(),
-        branch_targeted=False,
+        branches=branches,
+        branch_targeted=branch_targeted,
         detail="gh api",
+        destructive=is_destructive,
     )
 
 
