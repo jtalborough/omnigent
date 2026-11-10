@@ -1109,6 +1109,69 @@ def test_shell_gh_non_delete_write_unaffected() -> None:
     assert policy(_sh("gh pr create --repo octo/hello --base main")) is None
     assert policy(_sh("gh issue create --repo octo/hello")) is None
 
+# -- Shell: gh api DELETE (git refs and similar) --
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh api -X DELETE repos/octo/hello/git/refs/heads/feature",
+        "gh api --method DELETE repos/octo/hello/git/refs/heads/feature",
+        "gh api --method=DELETE /repos/octo/hello/git/refs/heads/rai/push-test",
+        "gh api -XDELETE repos/octo/hello/git/refs/heads/feature",
+        "gh api DELETE repos/octo/hello/git/refs/heads/feature",
+        "gh api -X DELETE repos/octo/hello/git/refs/tags/v1.0",
+        "gh api --method DELETE repos/octo/hello",
+    ],
+)
+def test_shell_gh_api_delete_denied_by_default(command: str) -> None:
+    """gh api DELETE is denied by default even on an allowed repo.
+
+    This is the same allow_destructive rule as git push :ref. Without it, a
+    session can delete a remote branch through the API after the git form is
+    blocked.
+    """
+    policy = github_policy(write_repos=["octo/hello"])
+    result = policy(_sh(command))
+    assert result is not None and result["result"] == "DENY"
+    assert "destructive" in result.get("reason", "").lower()
+
+
+def test_shell_gh_api_delete_allowed_when_opted_in() -> None:
+    """allow_destructive=True lets gh api DELETE through normal write gating."""
+    policy = github_policy(write_repos=["octo/hello"], allow_destructive=True)
+    assert policy(_sh("gh api -X DELETE repos/octo/hello/git/refs/heads/feature")) is None
+    assert policy(_sh("gh api DELETE repos/octo/hello/git/refs/heads/rai/push-test")) is None
+
+
+def test_shell_gh_api_delete_still_gates_repo() -> None:
+    """allow_destructive does not waive write_repos for gh api DELETE."""
+    policy = github_policy(write_repos=["octo/hello"], allow_destructive=True)
+    result = policy(_sh("gh api -X DELETE repos/octo/secret/git/refs/heads/feature"))
+    assert result is not None and result["result"] == "DENY"
+    assert "destructive" not in result.get("reason", "").lower()
+
+
+def test_shell_gh_api_delete_ref_respects_write_branches() -> None:
+    """DELETE of git/refs/heads/<branch> is branch-targeted once deletes are opted in."""
+    policy = github_policy(
+        write_repos=["octo/hello"],
+        write_branches=["rai/*"],
+        allow_destructive=True,
+    )
+    assert policy(_sh("gh api -X DELETE repos/octo/hello/git/refs/heads/rai/push-test")) is None
+    result = policy(_sh("gh api --method DELETE repos/octo/hello/git/refs/heads/main"))
+    assert result is not None and result["result"] == "DENY"
+    assert "main" in result.get("reason", "")
+
+
+def test_shell_gh_api_non_delete_write_unaffected() -> None:
+    """POST/PATCH gh api writes are not gated by allow_destructive."""
+    policy = github_policy(write_repos=["octo/hello"])
+    assert policy(_sh("gh api repos/octo/hello/pulls -X POST -f title=x")) is None
+    assert policy(_sh("gh api repos/octo/hello/issues/1 -X PATCH -f title=x")) is None
+
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Layer 1 — tag push protection
