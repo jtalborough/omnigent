@@ -215,3 +215,24 @@ instructions:
   not duplicate policy across adapters or add lifecycle metadata to `AgentSpec`.
 - If framework instructions grow beyond a small ordered list, introduce a
   structured `FrameworkInstructions` value at the prompt-composition boundary.
+
+## Fork rules (jtalborough/omnigent)
+
+This section applies only to this fork. Agents working here also follow:
+- Fleet rules and PR scope: [jtalborough/agents `shared/rules.md`](https://github.com/jtalborough/agents/blob/main/shared/rules.md)
+- Communication baseline: [jtalborough/agents `shared/communication.md`](https://github.com/jtalborough/agents/blob/main/shared/communication.md)
+
+PR scope:
+- Before coding, state your assumptions in the PR description.
+- Build the simplest change that works. Touch no unrelated files.
+- When behavior changes, write a high-level integration test first (see `tests/README.md` for where it belongs).
+- Make one logical commit per step.
+- Leads reject a PR that breaks these rules.
+
+Fork facts:
+- Open PRs against this fork's `main` only. Never open a PR, issue or comment on the upstream repo.
+- Set up with `uv sync --extra all --group dev`. Run the smallest relevant test: `uv run --no-sync pytest tests/<dir> -q`. CI (`ci.yml`, `CI result`) runs the full matrix.
+- `main` is protected: PR, required checks, 1 approving review. Never push to `main`, never force-push, never merge your own PR.
+- Upstream sync goes through a PR that merges `upstream/main`, so the fork's own commits stay.
+- The builder definition is in `.omnigent/omnigent-builder/` (force-added; the rest of `.omnigent/` stays ignored local state).
+- No secrets in this repo, ever.
