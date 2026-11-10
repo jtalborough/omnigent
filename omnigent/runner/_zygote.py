@@ -433,7 +433,13 @@ def _run_harness_child(request: dict[str, Any]) -> None:
 
     from omnigent.runtime.harnesses._runner import main
 
-    main(list(request.get("argv") or []))
+    # Direct exec of the harness sets sys.argv to the runner CLI flags, and
+    # hermes/cursor executors read ``--conversation-id`` from sys.argv (not
+    # from main()'s parsed args). A zygote-forked child used to keep the
+    # zygote's argv, so policy hooks and Omnigent MCP tools never loaded.
+    argv = list(request.get("argv") or [])
+    sys.argv = argv
+    main(argv)
 
 
 class _ZygoteServer:
