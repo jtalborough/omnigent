@@ -728,3 +728,60 @@ async def test_interrupt_session_returns_false_when_finished_or_absent(
     executor._proc = mock_proc
     assert await executor.interrupt_session("some-key") is False
     mock_proc.terminate.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, 600.0),
+        ("", 600.0),
+        ("1800", 1800.0),
+        ("90.5", 90.5),
+        ("abc", 600.0),
+        ("0", 600.0),
+        ("-5", 600.0),
+    ],
+)
+def test_hermes_turn_timeout_env(
+    monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: float
+) -> None:
+    """OMNIGENT_HERMES_TURN_TIMEOUT_S overrides the turn timeout; bad values fall back."""
+    from omnigent.inner.hermes_executor import _hermes_turn_timeout_s
+
+    if raw is None:
+        monkeypatch.delenv("OMNIGENT_HERMES_TURN_TIMEOUT_S", raising=False)
+    else:
+        monkeypatch.setenv("OMNIGENT_HERMES_TURN_TIMEOUT_S", raw)
+    assert _hermes_turn_timeout_s() == expected
+
+
+@pytest.mark.asyncio
+async def test_run_turn_timeout_uses_env(
+    executor: HermesExecutor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The env override reaches asyncio.wait_for and the error message."""
+    monkeypatch.setenv("OMNIGENT_HERMES_TURN_TIMEOUT_S", "1234")
+    mock_process = MagicMock()
+    mock_process.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+    seen: list[float] = []
+
+    async def fake_wait_for(aw, timeout):  # type: ignore[no-untyped-def]
+        seen.append(timeout)
+        if hasattr(aw, "close"):
+            aw.close()
+        raise TimeoutError
+
+    with (
+        patch.object(asyncio, "create_subprocess_exec", new=AsyncMock(return_value=mock_process)),
+        patch.object(asyncio, "wait_for", new=fake_wait_for),
+    ):
+        events = [
+            e
+            async for e in executor.run_turn(
+                messages=[{"role": "user", "content": "Hi"}], tools=[], system_prompt=""
+            )
+        ]
+
+    assert seen and seen[0] == 1234.0
+    assert isinstance(events[0], ExecutorError)
+    assert "1234.0s" in events[0].message

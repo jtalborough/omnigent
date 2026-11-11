@@ -64,9 +64,36 @@ from omnigent.inner.executor import (
 
 _logger = logging.getLogger(__name__)
 
-# Maximum seconds to wait for a Hermes subprocess to complete a single turn.
-# Complex tasks (multi-tool-calling loops) may take several minutes.
-_HERMES_TURN_TIMEOUT_S = 600.0
+# Default maximum seconds to wait for a Hermes subprocess to complete a single
+# turn. Complex tasks (multi-tool-calling loops) may take several minutes.
+_HERMES_TURN_TIMEOUT_DEFAULT_S = 600.0
+_HERMES_TURN_TIMEOUT_ENV = "OMNIGENT_HERMES_TURN_TIMEOUT_S"
+
+
+def _hermes_turn_timeout_s() -> float:
+    """
+    Return the per-turn Hermes subprocess timeout.
+
+    One Hermes turn runs the whole tool-calling loop in a single
+    subprocess, so a turn that runs a slow test suite can exceed the
+    default. Hosts may raise the limit with ``OMNIGENT_HERMES_TURN_TIMEOUT_S``.
+    Invalid or non-positive values fall back to the default.
+
+    :returns: Timeout in seconds.
+    """
+    raw = os.environ.get(_HERMES_TURN_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _HERMES_TURN_TIMEOUT_DEFAULT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        _logger.warning("Ignoring invalid %s=%r", _HERMES_TURN_TIMEOUT_ENV, raw)
+        return _HERMES_TURN_TIMEOUT_DEFAULT_S
+    if value <= 0:
+        _logger.warning("Ignoring non-positive %s=%r", _HERMES_TURN_TIMEOUT_ENV, raw)
+        return _HERMES_TURN_TIMEOUT_DEFAULT_S
+    return value
+
 
 # Regex to extract the session_id from Hermes' quiet-mode output line.
 # Matches lines like ``session_id: 20260620_142506_c51451``.
@@ -388,6 +415,7 @@ class HermesExecutor(Executor):
 
         _logger.debug("Hermes subprocess: %s", " ".join(args))
 
+        turn_timeout_s = _hermes_turn_timeout_s()
         proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -401,12 +429,12 @@ class HermesExecutor(Executor):
 
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(),
-                timeout=_HERMES_TURN_TIMEOUT_S,
+                timeout=turn_timeout_s,
             )
         except TimeoutError:
-            _logger.warning("Hermes subprocess timed out after %ss", _HERMES_TURN_TIMEOUT_S)
+            _logger.warning("Hermes subprocess timed out after %ss", turn_timeout_s)
             yield ExecutorError(
-                message=f"Hermes subprocess timed out after {_HERMES_TURN_TIMEOUT_S}s",
+                message=f"Hermes subprocess timed out after {turn_timeout_s}s",
                 retryable=True,
             )
             return
